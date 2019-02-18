@@ -1,0 +1,181 @@
+#!/usr/bin/python3
+
+"""Usage:
+  pgdump-sort <dump> [<sorted-dump>]
+  pgdump-sort -h | --help | --version
+
+"""
+
+from docopt import docopt
+import os
+import re
+import tempfile
+import shutil
+
+version='0.1'
+
+
+RE_OBJDESC = re.compile(
+	'-- (?P<isdata>(Data for )?)Name: (?P<name>.*?); '
+	'Type: (?P<type>.*?); '
+	'Schema: (?P<schema>.*?); '
+	'Owner: (?P<owner>.*)'
+)
+RE_SEQSET = re.compile("SELECT pg_catalog.setval\('(?P<name>.*?)'.*")
+
+
+def sort_databuf(buf):
+	pre = []
+	data = []
+	post = []
+
+	state = 0
+	ptr = pre
+	isins = False
+	for line in buf:
+		if 0 == state:
+			if line.startswith('COPY'):
+				ptr.append(line)
+				ptr = data
+				state = 1
+			elif line.startswith('INSERT'):
+				ptr = data
+				ptr.append(line)
+				isins = True
+				state = 1
+			else:
+				ptr.append(line)
+		elif 1 == state:
+			if isins and '\n' == line or not isins and '\\.\n' == line:
+				ptr = post
+				ptr.append(line)
+				status = 2
+			else:
+				ptr.append(line)
+		else:
+			ptr.append(line)
+
+	return pre + sorted(data) + post
+
+
+def flush_buf(destdir, fname, buf, isdata=False):
+	if len(buf) > 0 and buf[-1] == '\n':
+		del buf[-1]
+	if not buf or not fname:
+		return
+	if isdata:
+		buf = sort_databuf(buf)
+	with open(os.path.join(destdir, fname), "w") as out:
+		out.writelines(buf)
+
+
+def compose_fname(clsseq, typ, schema, name, owner):
+	fname = '%d:%s:%s:%s:%s' % (
+		clsseq, typ, owner, schema, name
+	)
+	if 255 < len(fname):
+		fname = fname[:255-3] + "..."
+	return fname
+
+
+def dissect(dump, destdir):
+	outfname = '0:STARTED'
+	buf = []
+
+	isdata = False
+	inside_seq_set = False
+
+	for line in open(dump):
+		if line.startswith('-- Started on '):
+			line = '-- Started on 1970-01-01 00:00:00 UTC\n'
+			buf.append(line)
+			flush_buf(destdir, outfname, buf)
+			outfname = '1:SETTINGS'
+			buf = []
+
+		elif line.startswith('-- TOC entry '):
+			line = '-- TOC entry 0 (class 0 OID 0)\n'
+			newbuf = [line]
+			if 0 < len(buf) and '--\n' == buf[-1]:
+				newbuf.insert(0, buf.pop())
+			if '\n' == buf[0] and '1:SETTINGS' == outfname:
+				del buf[0]
+			flush_buf(destdir, outfname, buf, isdata)
+			buf = newbuf
+			outfname = None
+
+		elif line.startswith('-- Name: ') or line.startswith('-- Data for Name: '):
+			m = re.match(RE_OBJDESC, line)
+			if m.group('isdata'):
+				clsseq = 3
+				isdata = True
+			else:
+				clsseq = 2
+				isdata = False
+
+			outfname = compose_fname(
+				clsseq,
+				m.group('type'),
+				m.group('schema'),
+				m.group('name'),
+				m.group('owner')
+			)
+
+			inside_seq_set = False
+			if 'SEQUENCE SET' == m.group('type'):
+				inside_seq_set = True
+
+			buf.append(line)
+
+		elif line.startswith('-- Completed on '):
+			line = '-- Completed on 1970-01-01 00:00:00 UTC\n'
+			flush_buf(destdir, outfname, buf, isdata)
+			isdata = False
+			buf = [line]
+			outfname = '9:COMPLETED'
+
+		else:
+			if line.startswith('-- Dependencies: '):
+				line = '-- Dependencies: 0\n'
+			elif inside_seq_set and line.startswith('SELECT pg_catalog.setval'):
+				m = re.match(RE_SEQSET, line)
+				line = "SELECT pg_catalog.setval('%s', 1, false);\n" % m.group('name')
+			buf.append(line)
+
+	buf.append('\n')
+	flush_buf(destdir, outfname, buf, isdata)
+
+
+def recombine(destdir, dump):
+	out = open(dump, 'w')
+
+	first = True
+	for fname in sorted(os.listdir(destdir)):
+		if first:
+			first = False
+		else:
+			out.write('\n')
+		with open(os.path.join(destdir, fname)) as f:
+			out.writelines(f.readlines())
+
+	out.close()
+
+
+def pgdump_sort(dump, sdump):
+	destdir = tempfile.mkdtemp(suffix=dump, prefix='pgdump-sort')
+
+	dissect(dump, destdir)
+	recombine(destdir, sdump)
+
+	shutil.rmtree(destdir)
+
+
+if __name__ == '__main__':
+	args = docopt(__doc__, version=version)
+
+	dump = args['<dump>']
+	sdump = args['<sorted-dump>']
+	if sdump is None:
+		sdump = re.sub(r'\.sql$', '', dump) + '-sorted.sql'
+
+	pgdump_sort(dump, sdump)
