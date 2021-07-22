@@ -162,7 +162,7 @@ def recombine(destdir, dump):
 
 
 def pgdump_sort(dump, sdump):
-	destdir = tempfile.mkdtemp(suffix=dump, prefix='pgdump-sort')
+	destdir = tempfile.mkdtemp(suffix=os.path.basename(dump), prefix='pgdump-sort')
 
 	dissect(dump, destdir)
 	recombine(destdir, sdump)
