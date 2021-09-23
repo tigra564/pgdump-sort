@@ -11,8 +11,9 @@ import os
 import re
 import tempfile
 import shutil
+from enum import Enum
 
-version='0.1'
+version='0.2'
 
 
 RE_OBJDESC = re.compile(
@@ -24,7 +25,87 @@ RE_OBJDESC = re.compile(
 RE_SEQSET = re.compile("SELECT pg_catalog.setval\('(?P<name>.*?)'.*")
 
 
-def sort_databuf(buf):
+class state(Enum):
+	EMPTY = 1
+	SETTINGS = 2
+	DEF = 3
+	DATA = 4
+	COPY = 5
+	INSERT = 6
+	SEQSET = 7
+
+
+class buffer(list):
+	destdir = None
+	st = state.EMPTY
+	fname = None
+	title = None
+
+	def __init__(self, destdir):
+		self.destdir = destdir
+
+	def flushto(self, st, fname, title):
+		#print("EVICTING", self.st, "to", self.fname, "New state:", st)
+
+		# Trim ellipsing comments and empty lines
+		while self and ('' == self[0] or self[0].startswith('--')):
+			del self[0]
+		while self and ('' == self[-1] or self[-1].startswith('--')):
+			del self[-1]
+
+		if len(self):
+			if self.st in (state.COPY, state.INSERT):
+				self[:] = sort_datalines(self)
+
+			self[:] = [
+				'--',
+				self.title,
+				'--',
+				'',
+			] + self
+
+			with open(os.path.join(self.destdir, self.fname), "w") as out:
+				out.writelines([l + '\n' for l in self])
+
+		self.clear()
+		self.st = st
+		self.fname = fname
+		self.title = title
+
+
+	def proc_comment(self, line):
+		# Returns True if the line is a comment, i.e. it has been processed
+		if not line.startswith('--'):
+			return False
+
+		m = re.match(RE_OBJDESC, line)
+		if not m:
+			return True
+
+		if 'SEQUENCE SET' == m.group('type'):
+			st = state.SEQSET
+		elif m.group('isdata'):
+			st = state.DATA
+		else:
+			st = state.DEF
+
+		fname = '%d:%s:%s:%s:%s' % (
+			st.value,
+			m.group('type'),
+			m.group('schema'),
+			m.group('name'),
+			m.group('owner')
+		)
+
+		if 255 < len(fname):
+			fname = fname[:255-3] + "..."
+
+		self.flushto(st, fname, line)
+
+		return True
+
+
+def sort_datalines(lines):
 	pre = []
 	data = []
 	post = []
@@ -32,7 +113,7 @@ def sort_databuf(buf):
 	state = 0
 	ptr = pre
 	isins = False
-	for line in buf:
+	for line in lines:
 		if 0 == state:
 			if line.startswith('COPY'):
 				ptr.append(line)
@@ -58,99 +139,65 @@ def sort_databuf(buf):
 	return pre + sorted(data) + post
 
 
-def flush_buf(destdir, fname, buf, isdata=False):
-	if len(buf) > 0 and buf[-1] == '\n':
-		del buf[-1]
-	if not buf or not fname:
-		return
-	if isdata:
-		buf = sort_databuf(buf)
-	with open(os.path.join(destdir, fname), "w") as out:
-		out.writelines(buf)
-
-
-def compose_fname(clsseq, typ, schema, name, owner):
-	fname = '%d:%s:%s:%s:%s' % (
-		clsseq, typ, owner, schema, name
-	)
-	if 255 < len(fname):
-		fname = fname[:255-3] + "..."
-	return fname
-
-
 def dissect(dump, destdir):
-	outfname = '0:STARTED'
-	buf = []
-
-	isdata = False
-	inside_seq_set = False
+	buf = buffer(destdir)
 
 	for line in open(dump):
-		if line.startswith('-- Started on '):
-			line = '-- Started on 1970-01-01 00:00:00 UTC\n'
-			buf.append(line)
-			flush_buf(destdir, outfname, buf)
-			outfname = '1:SETTINGS'
-			buf = []
+		# trim trailing newline (if any)
+		if '\n' == line[-1]:
+			line = line[:-1]
 
-		elif line.startswith('-- TOC entry '):
-			line = '-- TOC entry 0 (class 0 OID 0)\n'
-			newbuf = [line]
-			if 0 < len(buf) and '--\n' == buf[-1]:
-				newbuf.insert(0, buf.pop())
-			if '\n' == buf[0] and '1:SETTINGS' == outfname:
-				del buf[0]
-			flush_buf(destdir, outfname, buf, isdata)
-			buf = newbuf
-			outfname = None
-
-		elif line.startswith('-- Name: ') or line.startswith('-- Data for Name: '):
-			m = re.match(RE_OBJDESC, line)
-			if m.group('isdata'):
-				clsseq = 3
-				isdata = True
+		#print(buf.st.name.ljust(10), "\t[%s]" % line)
+		if buf.st == state.EMPTY:
+			if buf.proc_comment(line):
+				pass
+			elif '' == line:
+				pass
 			else:
-				clsseq = 2
-				isdata = False
+				buf.flushto(state.SETTINGS, "%d:%s" % (state.SETTINGS.value, "SETTINGS"),
+					'-- Sorted PostgreSQL database dump')
+				buf.append(line)
 
-			outfname = compose_fname(
-				clsseq,
-				m.group('type'),
-				m.group('schema'),
-				m.group('name'),
-				m.group('owner')
-			)
+		elif buf.st in (state.SETTINGS, state.DEF, state.INSERT):
+			if buf.proc_comment(line):
+				pass
+			else:
+				buf.append(line)
 
-			inside_seq_set = False
-			if 'SEQUENCE SET' == m.group('type'):
-				inside_seq_set = True
-
+		elif buf.st == state.DATA:
+			if line.startswith('COPY '):
+				buf.st = state.COPY
+			elif line.startswith('INSERT '):
+				buf.st = state.INSERT
 			buf.append(line)
 
-		elif line.startswith('-- Completed on '):
-			line = '-- Completed on 1970-01-01 00:00:00 UTC\n'
-			flush_buf(destdir, outfname, buf, isdata)
-			isdata = False
-			buf = [line]
-			outfname = '9:COMPLETED'
+		elif buf.st == state.COPY:
+			buf.append(line)
+			if r'\.' == line:
+				buf.flushto(state.EMPTY, None, None)
+
+		elif buf.st == state.SEQSET:
+			if buf.proc_comment(line):
+				pass
+			elif line.startswith('SELECT pg_catalog.setval'):
+				m = re.match(RE_SEQSET, line)
+				line = "SELECT pg_catalog.setval('%s', 1, false);" % m.group('name')
+				buf.append(line)
+			else:
+				buf.append(line)
 
 		else:
-			if line.startswith('-- Dependencies: '):
-				line = '-- Dependencies: 0\n'
-			elif inside_seq_set and line.startswith('SELECT pg_catalog.setval'):
-				m = re.match(RE_SEQSET, line)
-				line = "SELECT pg_catalog.setval('%s', 1, false);\n" % m.group('name')
-			buf.append(line)
+			print("This should not happen")
 
-	buf.append('\n')
-	flush_buf(destdir, outfname, buf, isdata)
+	buf.flushto(state.EMPTY, None, None)
 
 
 def recombine(destdir, dump):
 	out = open(dump, 'w')
 
 	first = True
-	for fname in sorted(os.listdir(destdir)):
+	sorted_files = sorted(os.listdir(destdir))
+	for fname in sorted_files:
 		if first:
 			first = False
 		else:
@@ -158,16 +205,26 @@ def recombine(destdir, dump):
 		with open(os.path.join(destdir, fname)) as f:
 			out.writelines(f.readlines())
 
+	if sorted_files:
+		out.writelines([
+			'\n',
+			'--\n',
+			'-- Sorted dump complete\n',
+			'--\n',
+		])
+
 	out.close()
 
 
 def pgdump_sort(dump, sdump):
 	destdir = tempfile.mkdtemp(suffix=os.path.basename(dump), prefix='pgdump-sort')
 
-	dissect(dump, destdir)
-	recombine(destdir, sdump)
+	try:
+		dissect(dump, destdir)
+		recombine(destdir, sdump)
 
-	shutil.rmtree(destdir)
+	finally:
+		shutil.rmtree(destdir)
 
 
 if __name__ == '__main__':
