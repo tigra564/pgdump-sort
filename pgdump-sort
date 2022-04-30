@@ -89,7 +89,7 @@ class buffer(list):
 		else:
 			st = state.DEF
 
-		fname = '%d:%s:%s:%s:%s' % (
+		fname = '%d-%s-%s-%s-%s' % (
 			st.value,
 			m.group('type'),
 			m.group('schema'),
