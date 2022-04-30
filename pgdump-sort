@@ -154,7 +154,7 @@ def dissect(dump, destdir):
 			elif '' == line:
 				pass
 			else:
-				buf.flushto(state.SETTINGS, "%d:%s" % (state.SETTINGS.value, "SETTINGS"),
+				buf.flushto(state.SETTINGS, "%d-%s" % (state.SETTINGS.value, "SETTINGS"),
 					'-- Sorted PostgreSQL database dump')
 				buf.append(line)
 
