@@ -13,6 +13,8 @@ import tempfile
 import shutil
 from enum import Enum
 
+from natsort import natsorted, ns
+
 version='0.2'
 
 
@@ -136,7 +138,7 @@ def sort_datalines(lines):
 		else:
 			ptr.append(line)
 
-	return pre + sorted(data) + post
+	return pre + natsorted(data, alg=ns.IGNORECASE) + post
 
 
 def dissect(dump, destdir):
