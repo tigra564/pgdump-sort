@@ -1,17 +1,30 @@
 #!/usr/bin/python3
 
-"""Usage:
-  pgdump-sort <dump> [<sorted-dump>]
-  pgdump-sort -h | --help | --version
+"""
+Usage: pgdump-sort [options] <dump> [<sorted-dump>]
+       pgdump-sort -h | --help | --version
 
+Options:
+  -n          Sort entries in natural order (requires python3 module natsort)
+
+  -h --help   Show this usage and exit
+  --version   Show version and exit
 """
 
 from docopt import docopt
 import os
+import sys
 import re
 import tempfile
 import shutil
 from enum import Enum
+
+_has_natsort = False
+try:
+	import natsort
+	_has_natsort = True
+except ModuleNotFoundError:
+	pass
 
 version='0.2'
 
@@ -41,8 +54,10 @@ class buffer(list):
 	fname = None
 	title = None
 
-	def __init__(self, destdir):
+	def __init__(self, destdir, fsorted, fsorted_args):
 		self.destdir = destdir
+		self.fsorted = fsorted
+		self.fsorted_args = fsorted_args
 
 	def flushto(self, st, fname, title):
 		#print("EVICTING", self.st, "to", self.fname, "New state:", st)
@@ -55,7 +70,7 @@ class buffer(list):
 
 		if len(self):
 			if self.st in (state.COPY, state.INSERT):
-				self[:] = sort_datalines(self)
+				self[:] = sort_datalines(self, self.fsorted, self.fsorted_args)
 
 			self[:] = [
 				'--',
@@ -105,7 +120,7 @@ class buffer(list):
 		return True
 
 
-def sort_datalines(lines):
+def sort_datalines(lines, fsorted, fsorted_args):
 	pre = []
 	data = []
 	post = []
@@ -136,11 +151,11 @@ def sort_datalines(lines):
 		else:
 			ptr.append(line)
 
-	return pre + sorted(data) + post
+	return pre + fsorted(data, **fsorted_args) + post
 
 
-def dissect(dump, destdir):
-	buf = buffer(destdir)
+def dissect(dump, destdir, fsorted, fsorted_args):
+	buf = buffer(destdir, fsorted, fsorted_args)
 
 	for line in open(dump):
 		# trim trailing newline (if any)
@@ -192,11 +207,11 @@ def dissect(dump, destdir):
 	buf.flushto(state.EMPTY, None, None)
 
 
-def recombine(destdir, dump):
+def recombine(destdir, dump, fsorted, fsorted_args):
 	out = open(dump, 'w')
 
 	first = True
-	sorted_files = sorted(os.listdir(destdir))
+	sorted_files = fsorted(os.listdir(destdir), **fsorted_args)
 	for fname in sorted_files:
 		if first:
 			first = False
@@ -216,16 +231,20 @@ def recombine(destdir, dump):
 	out.close()
 
 
-def pgdump_sort(dump, sdump):
+def pgdump_sort(dump, sdump, fsorted=sorted, **fsorted_args):
 	destdir = tempfile.mkdtemp(suffix=os.path.basename(dump), prefix='pgdump-sort')
 
 	try:
-		dissect(dump, destdir)
-		recombine(destdir, sdump)
+		dissect(dump, destdir, fsorted, fsorted_args)
+		recombine(destdir, sdump, fsorted, fsorted_args)
 
 	finally:
 		shutil.rmtree(destdir)
 
+natsort_error = \
+"""In order to use natural sort you need to install natsort module:
+   pip install natsort
+"""
 
 if __name__ == '__main__':
 	args = docopt(__doc__, version=version)
@@ -235,4 +254,16 @@ if __name__ == '__main__':
 	if sdump is None:
 		sdump = re.sub(r'\.sql$', '', dump) + '-sorted.sql'
 
-	pgdump_sort(dump, sdump)
+	if args['-n']:
+		if _has_natsort:
+			fsorted = natsort.natsorted
+			fsorted_args = {'alg': natsort.ns.IGNORECASE}
+		else:
+			print(natsort_error, file=sys.stderr)
+			exit(1)
+	else:
+		fsorted = sorted
+		fsorted_args = {}
+
+
+	pgdump_sort(dump, sdump, fsorted, **fsorted_args)
