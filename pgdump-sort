@@ -35,7 +35,7 @@ RE_OBJDESC = re.compile(
 	'Schema: (?P<schema>.*?); '
 	'Owner: (?P<owner>.*)'
 )
-RE_SEQSET = re.compile("SELECT pg_catalog.setval\('(?P<name>.*?)'.*")
+RE_SEQSET = re.compile(r"SELECT pg_catalog.setval\('(?P<name>.*?)'.*")
 
 
 class state(Enum):
