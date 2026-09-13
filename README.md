@@ -34,3 +34,23 @@ The utility will also transform particular lines of the dump into a canonical fo
 
 * The tool works on the initial dump line by line without deep inspection. This means that the dump may be broken and not suitable for injecting into psql.  However, the utility will anyway fulfill its main purpose: bring the dump to a diffable form.
 * During operation pgdump-sort creates a temporary directory and stores each entry in an individual file which name as constructed as a concatenation of various object properties including object name.  Since Postgresql has function overloading the name must be stored with all fuction arguments which may result into the file name exceeding OS limits (255 chars).  In this case filename is truncated to 252 chars plus '...'.
+
+## Alternatives
+`pgdump-sort` solves one narrow problem: making `pg_dump` output canonical so that diff is meaningful. Several tools address this problem, and it is worth knowing what they are.
+
+`apgdiff` is the de-facto standard for PostgreSQL schema diff. It parses `pg_dump` output and generates DDL to migrate one schema to another. It is available in Homebrew, Debian, and Ubuntu. However, it is unmaintained: the last release was years ago, and it does not understand newer PostgreSQL features.
+
+`pg-dump-compare` (npm) canonicalizes dump files and produces a unified diff. It is small and focused, but it only compares dumps—it does not connect to live databases or generate migration scripts.
+
+`PostgresCompare` is a commercial tool that compares schemas between live databases, files, and snapshots. It supports 38 object types and generates migration scripts. It recently added an MCP server for AI-assisted schema management. It is powerful, but it is not free and not open-source.
+
+`SchemaKeeper` takes a different approach: instead of one monolithic dump, it stores each schema object as a separate file, so schema changes appear as small, reviewable diffs in Git. It also includes drift detection in CI. This is closer to a workflow tool than a diff tool.
+
+`migraguard` is a newer entrant that treats migration files as the source of truth and uses schema dumps as derived artifacts for drift detection. It supports PostgreSQL, MySQL, and SQLite, but its lint coverage for MySQL and SQLite is limited to 17 generic rules versus 38 PostgreSQL-specific rules.
+
+## Where does pgdump-sort fit?
+It does not. `pgdump-sort` is not a schema diff tool. It is a preprocessing step that makes `pg_dump` output suitable for `diff`. Tools like `apgdiff` and `pg-dump-compare` solve the same problem at a higher level: they parse the dump and compare it structurally, not line by line.
+
+The reason `pgdump-sort` exists is that sometimes you do not want a full schema diff tool. Sometimes you just want to know if two dumps differ, and you want to use `git diff` to see how. `pgdump-sort` makes that possible. It is a small tool for a small job.
+
+If you need schema comparison, use `apgdiff` or `PostgresCompare`. If you need schema tracking in Git, use `SchemaKeeper`. If you need drift detection in CI, `migraguard` or `SchemaKeeper` will do the job. `pgdump-sort` is not a replacement for any of them.
